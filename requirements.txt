@@ -1,0 +1,6 @@
+neo4j-rust-ext == 5.25.0.0
+neo4j-graphrag == 1.0.0
+semantic-kernel == 1.11.0
+openai == 1.51.2
+flask
+flask-cors
