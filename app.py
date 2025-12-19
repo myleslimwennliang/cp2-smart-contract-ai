@@ -1,113 +1,121 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import streamlit as st
 import os
 import asyncio
-import nest_asyncio
-nest_asyncio.apply()  # Fix for Streamlit + asyncio multiple runs
-
-import streamlit as st
+import fitz
 from semantic_kernel import Kernel
 from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
-from semantic_kernel.contents.chat_history import ChatHistory
+from semantic_kernel.contents import ChatHistory
+from semantic_kernel.connectors.ai.open_ai import OpenAIChatPromptExecutionSettings
 from ContractPlugin import ContractPlugin
 from ContractService import ContractSearchService
-from semantic_kernel.connectors.ai.chat_completion_client_base import ChatCompletionClientBase
-from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.open_ai_prompt_execution_settings import (
-    OpenAIChatPromptExecutionSettings)
-from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
-from semantic_kernel.functions.kernel_arguments import KernelArguments
-import logging
-import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-
-# Get info from environment
-OPENAI_KEY = os.getenv('OPENAI_API_KEY')
-NEO4J_URI = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
-NEO4J_USER = os.getenv('NEO4J_USERNAME', 'neo4j')
-NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD')
-service_id = "contract_search"
-
-# Streamlit app configuration
+# -----------------------------
+# Streamlit setup
+# -----------------------------
 st.set_page_config(layout="wide")
-st.title("📄 Q&A Chatbot for Contract Review")
+st.title("📄 Contract Q&A Chatbot")
 
-# Initialize Kernel, Chat History, and Settings in Session State
-if 'semantic_kernel' not in st.session_state:
+# Load OpenAI key
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_KEY:
+    st.error("OPENAI_API_KEY not set in environment!")
+    st.stop()
+
+# Initialize Kernel & Session State
+if "semantic_kernel" not in st.session_state:
     kernel = Kernel()
-    contract_search_neo4j = ContractSearchService(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    kernel.add_plugin(ContractPlugin(contract_search_service=contract_search_neo4j), plugin_name="contract_search")
-    kernel.add_service(OpenAIChatCompletion(ai_model_id="gpt-4o", api_key=OPENAI_KEY, service_id=service_id))
-
-    settings: OpenAIChatPromptExecutionSettings = kernel.get_prompt_execution_settings_from_service_id(service_id=service_id)
-    settings.function_choice_behavior = FunctionChoiceBehavior.Auto(filters={"included_plugins": ["contract_search"]})
-
+    contract_service = ContractSearchService("bolt://localhost:7687", "neo4j", os.getenv("NEO4J_PASSWORD"))
+    
+    # Add LLM service
+    llm = OpenAIChatCompletion(ai_model_id="gpt-4o-mini", api_key=OPENAI_KEY)
+    kernel.add_service(llm)
+    
+    # Add ContractPlugin
+    contract_plugin = ContractPlugin(contract_search_service=contract_service, llm=llm)
+    kernel.add_plugin(contract_plugin, plugin_name="contract_search")
+    
     st.session_state.semantic_kernel = kernel
-    st.session_state.kernel_settings = settings
-    st.session_state.chat_history = ChatHistory()
-    st.session_state.ui_chat_history = []
+    st.session_state.contract_plugin = contract_plugin
+    st.session_state.chat_history = []
+    st.session_state.selected_contract = None
 
-if 'user_question' not in st.session_state:
-    st.session_state.user_question = ""
+# -----------------------------
+# Contract Upload
+# -----------------------------
+st.subheader("Upload a Contract")
+uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
+contract_name_input = st.text_input("Contract Name:")
 
-# Async agent response function
-async def get_agent_response(user_input):
-    kernel = st.session_state.semantic_kernel
-    history = st.session_state.chat_history
-    settings = st.session_state.kernel_settings
+if st.button("Upload Contract"):
+    if uploaded_file and contract_name_input.strip() != "":
+        result = st.session_state.contract_plugin.upload_contract(contract_name_input, uploaded_file)
+        st.success(f"Contract uploaded: {contract_name_input}")
+        st.json(result)
+    else:
+        st.error("Please provide both a contract file and a name.")
 
-    history.add_user_message(user_input)
-    st.session_state.ui_chat_history.append({"role": "user", "content": user_input})
+# -----------------------------
+# List and Select Contracts
+# -----------------------------
+st.subheader("Available Contracts")
+contracts = st.session_state.contract_plugin.get_all_contracts()
+if contracts:
+    contract_names = [c["name"] for c in contracts]
+    selected_name = st.selectbox("Select a contract to ask about:", contract_names)
+    st.session_state.selected_contract = next((c for c in contracts if c["name"] == selected_name), None)
+else:
+    st.info("No contracts available yet.")
 
-    retry_attempts = 3
-    for attempt in range(retry_attempts):
-        try:
-            chat_completion: OpenAIChatCompletion = kernel.get_service(type=ChatCompletionClientBase)
-            result = (await chat_completion.get_chat_message_contents(
-                chat_history=history,
-                settings=settings,
-                kernel=kernel,
-            ))[0]
+# -----------------------------
+# Summarize Selected Contract
+# -----------------------------
+if st.session_state.selected_contract:
+    if st.button("Summarize Selected Contract"):
+        summary = st.session_state.contract_plugin.summarize_contract(st.session_state.selected_contract["file_path"])
+        st.markdown("**Summary:**")
+        st.write(summary)
 
-            history.add_message(result)
-            st.session_state.ui_chat_history.append({"role": "agent", "content": str(result)})
-            return
-        except Exception as e:
-            if attempt < retry_attempts - 1:
-                time.sleep(0.2)
-            else:
-                st.session_state.ui_chat_history.append({"role": "agent", "content": f"Error: {str(e)}"})
+# -----------------------------
+# Ask Questions About Contract
+# -----------------------------
+st.subheader("Ask About Contract")
+question_input = st.text_input("Your question:")
 
-# Synchronous wrapper to safely call async function in Streamlit
-def run_agent_response(user_input):
-    return asyncio.get_event_loop().run_until_complete(get_agent_response(user_input))
+async def ask_question(question, contract_path):
+    """
+    Sends question and contract text to LLM for answer.
+    """
+    plugin = st.session_state.contract_plugin
+    # Extract text from PDF
+    try:
+        text_content = ""
+        with fitz.open(contract_path) as doc:
+            for page in doc:
+                text_content += page.get_text()
+        if not text_content.strip():
+            return "Contract is empty or could not extract text."
+    except Exception as e:
+        return f"Failed to read PDF: {e}"
 
-# Container for chat history
-chat_placeholder = st.container()
+    prompt = f"Answer this question simply for a non-expert. Contract:\n{text_content}\n\nQuestion: {question}"
+    settings = OpenAIChatPromptExecutionSettings()
+    chat_history = ChatHistory()
+    chat_history.add_user_message(prompt)
+    result = await plugin._llm.get_chat_message_contents(
+        chat_history=chat_history,
+        settings=settings,
+        kernel=None
+    )
+    return result[0].content if result else "No answer generated."
 
-def display_chat():
-    with chat_placeholder:
-        for chat in st.session_state.ui_chat_history:
-            if chat['role'] == 'user':
-                st.markdown(f"**User:** {chat['content']}")
-            else:
-                st.markdown(f"**Agent:** {chat['content']}")
-
-# Form for user input
-with st.form(key="user_input_form"):
-    user_question = st.text_input("Enter your question:", value=st.session_state.user_question, key="user_question_")
-    send_button = st.form_submit_button("Send")
-
-if send_button and user_question.strip() != "":
-    st.session_state.user_question = user_question
-    run_agent_response(st.session_state.user_question)  # Use sync wrapper
-    st.session_state.user_question = ""
-    display_chat()
-elif send_button:
-    st.error("Please enter a question before sending.")
+if st.button("Ask Question") and question_input.strip() != "" and st.session_state.selected_contract:
+    answer = asyncio.run(ask_question(question_input, st.session_state.selected_contract["file_path"]))
+    st.markdown("**Answer:**")
+    st.write(answer)
 
 # Footer
 st.markdown("---")
-st.write("© 2025 SmartContractAI. All rights reserved.")
+st.write("© 2025 SmartContractAI.")
