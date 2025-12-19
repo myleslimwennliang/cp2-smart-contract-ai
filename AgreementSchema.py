@@ -19,10 +19,13 @@ class ContractClause(TypedDict):
     clause_type: str
     excerpts: List[str]
 
-class Agreement(TypedDict):  
+class Agreement(TypedDict, total=False):  
+    contract_id: int
+    name: str
     agreement_name: str
     agreement_type: str
     effective_date: str
+    agreement_date: str
     expiration_date: str
     renewal_term: str
     notice_period_to_terminate_Renewal: str
