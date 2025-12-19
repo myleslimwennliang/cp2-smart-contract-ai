@@ -4,3 +4,6 @@ semantic-kernel == 1.11.0
 openai == 1.51.2
 flask
 flask-cors
+PyMuPDF==1.26.7
+python-dotenv
+streamlit
