@@ -5,7 +5,8 @@ from neo4j_graphrag.retrievers import VectorCypherRetriever,Text2CypherRetriever
 from neo4j_graphrag.embeddings import OpenAIEmbeddings
 from formatters import my_vector_search_excerpt_record_formatter
 from neo4j_graphrag.llm import OpenAILLM
-
+import os
+from datetime import datetime
 
 
 class ContractSearchService:
@@ -14,7 +15,7 @@ class ContractSearchService:
         self._driver = driver
         self._openai_embedder = OpenAIEmbeddings(model = "text-embedding-3-small")
         # Create LLM object. Used to generate the CYPHER queries
-        self._llm = OpenAILLM(model_name="gpt-4o", model_params={"temperature": 0}) 
+        self._llm = OpenAILLM(model_name="gpt-4o-mini", model_params={"temperature": 0}) 
         
     
     async def get_contract(self, contract_id: int) -> Agreement:
@@ -180,7 +181,7 @@ class ContractSearchService:
             }
             c : ContractClause = {
                 "clause_type": content['clause_type'],
-                "excerpts" : [content['excerpt']]
+                "excerpts" : [content['excerpt'][:500]]
             }            
             a['clauses'] = [c]
             agreements.append(a)
@@ -219,7 +220,8 @@ class ContractSearchService:
         retriever = Text2CypherRetriever(
             driver=self._driver,
             llm=self._llm,
-            neo4j_schema=NEO4J_SCHEMA
+            neo4j_schema=NEO4J_SCHEMA,
+            result_limit=10
         )
 
         # Generate a Cypher query using the LLM, send it to the Neo4j database, and return the results
@@ -272,7 +274,8 @@ class ContractSearchService:
             elif clause_dict:
             
                 for clause_type_key in clause_dict:
-                    clause : ContractClause = {"clause_type": clause_type_key,"excerpts": clause_dict[clause_type_key]}
+                    truncated_excerpts = [excerpt[:500] for excerpt in clause_dict[clause_type_key]]
+                    clause : ContractClause = {"clause_type": clause_type_key,"excerpts": truncated_excerpts}
                     clauses.append(clause)
 
             agreement['clauses'] = clauses
@@ -319,5 +322,58 @@ class ContractSearchService:
 
         return agreement
 
+    def add_contract(self, contract_name: str, source_file_path: str):
+        """
+        Adds a new contract to the system:
+        - Moves the file to persistent storage
+        - Stores metadata in Neo4j
+        """
+        # Ensure persistent storage directory exists
+        contracts_dir = os.path.join(os.getcwd(), "data/contracts")
+        os.makedirs(contracts_dir, exist_ok=True)
 
+        # Generate a unique file name to avoid collisions
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"{contract_name.replace(' ','_')}_{timestamp}.pdf"
+        dest_path = os.path.join(contracts_dir, filename)
+
+        # Move the uploaded file to persistent storage
+        os.rename(source_file_path, dest_path)
+
+        # Store contract metadata in Neo4j
+        query = """
+        MERGE (c:Contract {name: $name})
+        SET c.file_path = $file_path, c.uploaded_at = datetime()
+        RETURN c
+        """
+        self._driver.execute_query(query, {"name": contract_name, "file_path": dest_path})
+
+        # Optional: generate embeddings for retrieval
+        # self._openai_embedder.embed_file(dest_path)
+
+        return dest_path
+    
+    def get_all_contracts(self):
+        """
+        Returns a list of all uploaded contracts stored in data/contracts
+        as dictionaries with keys: 'name', 'file_path', 'uploaded_at'
+        """
+        contracts_dir = os.path.join(os.getcwd(), "data/contracts")
+        os.makedirs(contracts_dir, exist_ok=True)
+
+        contracts = []
+        for filename in os.listdir(contracts_dir):
+            if filename.endswith(".pdf"):
+                file_path = os.path.join(contracts_dir, filename)
+                uploaded_at = datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat()
+                contract_name = filename.rsplit("_", 1)[0].replace("_", " ")
+                contracts.append({
+                    "name": contract_name,
+                    "file_path": file_path,
+                    "uploaded_at": uploaded_at
+                })
+
+        # Sort by uploaded_at descending
+        contracts.sort(key=lambda x: x['uploaded_at'], reverse=True)
+        return contracts
 
