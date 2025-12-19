@@ -22,7 +22,7 @@ extraction_prompt = read_text_file('./prompts/contract_extraction_prompt.txt')
 # --------------------------
 # 3. Create the assistant
 # --------------------------
-MODEL_NAME = "gpt-4o-2024-08-06" 
+MODEL_NAME = "gpt-4o-mini" 
 
 pdf_assistant = client.beta.assistants.create(
     model=MODEL_NAME,
